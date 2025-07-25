@@ -1,5 +1,6 @@
 package team.flex.payroll
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.microsoft.playwright.Browser
 import com.microsoft.playwright.BrowserType
 import com.microsoft.playwright.Page.PdfOptions
@@ -18,8 +19,7 @@ import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
-import java.io.File
-import java.io.FileInputStream
+import java.io.ByteArrayInputStream
 
 @SpringBootApplication
 class PayrollRendererApplication {
@@ -45,14 +45,12 @@ class HelloController(
 ) {
     @PostMapping(consumes = [MediaType.APPLICATION_JSON_VALUE], produces = [MediaType.APPLICATION_PDF_VALUE])
     fun hello(@RequestBody command: HelloCommand): ResponseEntity<InputStreamResource> {
-        val pdfFile = File.createTempFile("output-", ".pdf")
-
-        pdfRenderer.renderHtmlToPdf(command.name, pdfFile)
+        val pdfBytes = pdfRenderer.renderHtmlToPdf(command)
 
         return ResponseEntity.ok()
             .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_PDF_VALUE)
             .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=hello.pdf")
-            .body(InputStreamResource(FileInputStream(pdfFile)))
+            .body(InputStreamResource(ByteArrayInputStream(pdfBytes)))
     }
 }
 
@@ -61,20 +59,34 @@ data class HelloCommand(val name: String)
 @Component
 class PdfRenderer(
     private val browser: Browser,
-    private var serverProperties: ServerProperties,
+    private val serverProperties: ServerProperties,
+    private val objectMapper: ObjectMapper,
 ) {
-    fun renderHtmlToPdf(nameToGreet: String, pdfFile: File) {
-        browser.newPage().apply {
-            navigate("http://localhost:${serverProperties.port}?name=${nameToGreet}")
+    fun renderHtmlToPdf(command: HelloCommand): ByteArray? {
+        browser.newContext().use { context ->
+            context.newPage().use { page ->
+                page.navigate("http://localhost:${serverProperties.port}?name=${command.name}")
 
-            waitForLoadState(LoadState.NETWORKIDLE)
+                page.waitForLoadState(LoadState.NETWORKIDLE)
 
-            pdf(
-                PdfOptions()
-                    .setPath(pdfFile.toPath())
-                    .setFormat("A4")
-                    .setPrintBackground(true)
-            )
+                // 템플릿에 바인딩할 데이터를 페이지에 끼워 넣고 다시 렌더링한다
+                val data = objectMapper.writeValueAsString(command)
+                page.evaluate(DATA_FUNC, data)
+
+                return page.pdf(
+                    PdfOptions()
+                        .setFormat("A4")
+                        .setPrintBackground(true)
+                )
+            }
         }
+    }
+
+    companion object {
+        const val DATA_FUNC = """
+            (data) => {
+              window.renderData = data;
+              if (window.onRenderDataReady) window.onRenderDataReady(data);
+            }"""
     }
 }
