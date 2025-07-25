@@ -1,0 +1,10 @@
+server:
+  port: 8080
+
+spring:
+  web:
+    resources:
+      static-locations: classpath:/public/
+      cache:
+        cachecontrol:
+          max-age: 3600

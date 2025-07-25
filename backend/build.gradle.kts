@@ -9,8 +9,10 @@ plugins {
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+    implementation("com.microsoft.playwright:playwright:1.54.0")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
 }
@@ -26,6 +28,14 @@ kotlin {
         jvmToolchain(21)
         freeCompilerArgs.addAll("-Xjsr305=strict")
     }
+}
+
+tasks.named<ProcessResources>("processResources") {
+    dependsOn(rootProject.tasks.named("copyFrontend"))
+}
+
+tasks.named<Delete>("clean") {
+    delete("${projectDir}/src/main/resources/public")
 }
 
 jib {

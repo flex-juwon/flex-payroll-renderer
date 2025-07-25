@@ -1,5 +1,3 @@
-import com.github.gradle.node.npm.task.NpmTask
-
 plugins {
     idea
     kotlin("jvm") version "2.1.20"
@@ -28,7 +26,7 @@ node {
 val frontendDir = "${project.projectDir}/frontend"
 val publishDir = "${project.projectDir}/backend/src/main/resources/public"
 
-val buildFrontend = tasks.register<NpmTask>("buildFrontend") {
+val buildFrontend = tasks.register<com.github.gradle.node.npm.task.NpmTask>("buildFrontend") {
     dependsOn(tasks.npmInstall)
     workingDir.set(file(frontendDir))
     args.set(listOf("run", "build"))
@@ -51,23 +49,18 @@ val copyFrontend = tasks.register("copyFrontend") {
     }
 }
 
-tasks.named("build") {
-    dependsOn(copyFrontend)
-}
-
-val cleanFrontend = tasks.register<NpmTask>("cleanFrontend") {
+val cleanFrontend = tasks.register<com.github.gradle.node.npm.task.NpmTask>("cleanFrontend") {
     workingDir.set(file(frontendDir))
     args.set(listOf("run", "clean"))
 }
 
 tasks.named("clean") {
     dependsOn(cleanFrontend)
-    delete(file(publishDir))
 }
 
 // frontend development
 
-val runFrontend = tasks.register<NpmTask>("runFrontend") {
+val runFrontend = tasks.register<com.github.gradle.node.npm.task.NpmTask>("runFrontend") {
     dependsOn(tasks.npmInstall)
     workingDir.set(file(frontendDir))
     args.set(listOf("run", "start"))
