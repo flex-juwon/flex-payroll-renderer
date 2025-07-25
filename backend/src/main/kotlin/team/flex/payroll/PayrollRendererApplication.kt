@@ -45,7 +45,14 @@ class HelloController(
 ) {
     @PostMapping(consumes = [MediaType.APPLICATION_JSON_VALUE], produces = [MediaType.APPLICATION_PDF_VALUE])
     fun hello(@RequestBody command: HelloCommand): ResponseEntity<InputStreamResource> {
-        val pdfBytes = pdfRenderer.renderHtmlToPdf(command)
+        // pdf 파일 생성당 5초가 걸리는 상황을 임의로 연출한다
+        Thread.sleep(5000)
+
+        val pdfBytes = try {
+            pdfRenderer.renderHtmlToPdf(command)
+        } catch (e: Exception) {
+            throw RuntimeException("Error occurred while rendering pdf", e)
+        }
 
         return ResponseEntity.ok()
             .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_PDF_VALUE)
@@ -63,23 +70,27 @@ class PdfRenderer(
     private val objectMapper: ObjectMapper,
 ) {
     fun renderHtmlToPdf(command: HelloCommand): ByteArray? {
-        browser.newContext().use { context ->
-            context.newPage().use { page ->
-                page.navigate("http://localhost:${serverProperties.port}?name=${command.name}")
+        val context = browser.newContext()
 
-                page.waitForLoadState(LoadState.NETWORKIDLE)
+        val pdfBytes = context.newPage().use { page ->
+            page.navigate("http://localhost:${serverProperties.port}?name=${command.name}")
 
-                // 템플릿에 바인딩할 데이터를 페이지에 끼워 넣고 다시 렌더링한다
-                val data = objectMapper.writeValueAsString(command)
-                page.evaluate(DATA_FUNC, data)
+            page.waitForLoadState(LoadState.NETWORKIDLE)
 
-                return page.pdf(
-                    PdfOptions()
-                        .setFormat("A4")
-                        .setPrintBackground(true)
-                )
-            }
+            // 템플릿에 바인딩할 데이터를 페이지에 끼워 넣고 다시 렌더링한다
+            val data = objectMapper.writeValueAsString(command)
+            page.evaluate(DATA_FUNC, data)
+
+            page.pdf(
+                PdfOptions()
+                    .setFormat("A4")
+                    .setPrintBackground(true)
+            )
         }
+
+        context.close()
+
+        return pdfBytes
     }
 
     companion object {

@@ -46,9 +46,23 @@ $ docker image ls
 
 $ docker run -it --rm -p 8080:8080 flex-payroll-renderer:latest
 # 2025-07-25T05:54:55.132Z  INFO 1 --- [           main] t.f.p.PayrollRendererApplicationKt       : Started PayrollRendererApplicationKt in 2.927 seconds (process running for 3.798)
+
+$ docker run -it --rm -p 8080:8080 --memory-reservation=512m --memory=4g --cpus="4"  flex-payroll-renderer:latest
+# memory min 1g / max 4g, cpu 4 cores
+```
+
+### Performance test
+
+```shell
+$ brew install jmeter
+
+$ jmeter -n -t ./docs/hello-api-test.jmx -l ./build/hello-api-test-result.csv -e -o ./build/test-reports
+
+$ open ./build/test-reports/index.html
 ```
 
 ### TODO
 
 - [x] Docker Image (JRE21 + PlayWright)
-- [ ] 단위 시간당 처리량 측정
+- [x] 단위 시간당 처리량 측정
+- [ ] Spring <-> PlayWright+index.html 간 더 나은 데이터 교환 방식 연구
