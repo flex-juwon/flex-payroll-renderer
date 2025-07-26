@@ -13,6 +13,7 @@ dependencies {
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
     implementation("com.microsoft.playwright:playwright:1.54.0")
+    implementation("org.apache.commons:commons-pool2:2.12.1")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
 }

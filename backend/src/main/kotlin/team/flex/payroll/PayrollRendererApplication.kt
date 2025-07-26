@@ -5,6 +5,13 @@ import com.microsoft.playwright.BrowserType
 import com.microsoft.playwright.Page.PdfOptions
 import com.microsoft.playwright.Playwright
 import com.microsoft.playwright.options.LoadState
+import org.apache.commons.pool2.BasePooledObjectFactory
+import org.apache.commons.pool2.ObjectPool
+import org.apache.commons.pool2.PooledObject
+import org.apache.commons.pool2.PooledObjectFactory
+import org.apache.commons.pool2.impl.DefaultPooledObject
+import org.apache.commons.pool2.impl.GenericObjectPool
+import org.apache.commons.pool2.impl.GenericObjectPoolConfig
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.autoconfigure.web.ServerProperties
 import org.springframework.boot.runApplication
@@ -25,17 +32,9 @@ import java.util.concurrent.ConcurrentHashMap
 
 @SpringBootApplication
 class PayrollRendererApplication {
-    // Playwright Java API는 WebSocket 프로토콜로 headless Chromium과 통신한다
-    // -> Race Condition 유발 <- Browser 인스턴스 풀링등을 고려해봄직함
     @Bean(destroyMethod = "close")
     fun playwright(): Playwright =
         Playwright.create()
-
-    @Bean(destroyMethod = "close")
-    fun browser(playwright: Playwright): Browser =
-        playwright.chromium().launch(
-            BrowserType.LaunchOptions().setHeadless(true)
-        )
 
     @Bean
     fun commandRegistry(): ConcurrentHashMap<UUID, HelloCommand> =
@@ -98,6 +97,28 @@ class PdfRenderingService(
 }
 
 @Component
+class PdfRenderer(
+    private val browserPool: BrowserPool,
+    private val serverProperties: ServerProperties,
+) {
+    fun renderHtmlToPdf(commandId: UUID): ByteArray? {
+        val browser = browserPool.borrowObject()
+        val context = browser.newContext()
+
+        val page = context.newPage()
+        page.navigate("http://localhost:${serverProperties.port}?commandId=${commandId}")
+        page.waitForLoadState(LoadState.NETWORKIDLE)
+        val pdfBytes = page.pdf(PdfOptions().setFormat("A4").setPrintBackground(true))
+
+        page.close()
+        context.close()
+        browserPool.returnObject(browser)
+
+        return pdfBytes
+    }
+}
+
+@Component
 class HelloCommandRepository(
     private val commandRegistry: ConcurrentHashMap<UUID, HelloCommand>,
 ) {
@@ -115,21 +136,36 @@ class HelloCommandRepository(
 }
 
 @Component
-class PdfRenderer(
-    private val browser: Browser,
-    private val serverProperties: ServerProperties,
+class BrowserPool(
+    private val playwright: Playwright,
 ) {
-    fun renderHtmlToPdf(commandId: UUID): ByteArray? {
-        val context = browser.newContext()
+    private lateinit var pool: ObjectPool<Browser>
+    init {
+        val factory: PooledObjectFactory<Browser> =
+            object : BasePooledObjectFactory<Browser>() {
+                override fun create(): Browser =
+                    playwright.chromium().launch(
+                        BrowserType.LaunchOptions().setHeadless(true)
+                    )
 
-        val page = context.newPage()
-        page.navigate("http://localhost:${serverProperties.port}?commandId=${commandId}")
-        page.waitForLoadState(LoadState.NETWORKIDLE)
-        val pdfBytes = page.pdf(PdfOptions().setFormat("A4").setPrintBackground(true))
+                override fun wrap(browser: Browser?): PooledObject<Browser> =
+                    DefaultPooledObject(browser)
+            }
 
-        page.close()
-        context.close()
+        val config: GenericObjectPoolConfig<Browser> =
+            GenericObjectPoolConfig<Browser>().apply {
+                minIdle = Runtime.getRuntime().availableProcessors()
+            }
 
-        return pdfBytes
+        pool = GenericObjectPool(factory, config).apply {
+            addObjects(Runtime.getRuntime().availableProcessors())
+        }
+    }
+
+    fun borrowObject(): Browser =
+        pool.borrowObject()
+
+    fun returnObject(browser: Browser) {
+        pool.returnObject(browser)
     }
 }

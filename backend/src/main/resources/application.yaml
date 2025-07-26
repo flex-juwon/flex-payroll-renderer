@@ -1,5 +1,8 @@
 server:
   port: 8080
+  tomcat:
+    threads:
+      min-spare: 20
 
 spring:
   web:
