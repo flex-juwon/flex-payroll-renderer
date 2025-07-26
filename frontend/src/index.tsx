@@ -8,10 +8,10 @@ const root = ReactDOM.createRoot(
 );
 
 const urlParams = new URLSearchParams(window.location.search);
-const name = urlParams.get('name') || 'Anonymous';
+const commandId: string = urlParams.get('commandId') || '';
 
 root.render(
   <React.StrictMode>
-    <App name={name}/>
+    <App commandId={commandId}/>
   </React.StrictMode>
 );

@@ -65,4 +65,51 @@ $ open ./build/test-reports/index.html
 
 - [x] Docker Image (JRE21 + PlayWright)
 - [x] 단위 시간당 처리량 측정
-- [ ] Spring <-> PlayWright+index.html 간 더 나은 데이터 교환 방식 연구
+- [x] Spring <-> PlayWright+index.html 간 더 나은 데이터 교환 방식 연구
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant HTTP1 as Controller1
+    participant SVC as Service
+    participant CR as CommandRegistry
+    participant PR as PdfRenderer
+    participant PW as Playwright (headless browser)
+    participant WEB as SPA index.html
+    participant HTTP2 as Controller2
+
+    C->>HTTP1: POST /api/hello
+    activate HTTP1
+    HTTP1->>SVC: render(Command)
+    activate SVC
+    SVC->>CR: put(UUID, Command)
+    activate CR
+    deactivate CR
+    SVC->>PR: renderHtmlToPdf(UUID)
+    activate PR
+    PR->>PW: load Chromium
+    activate PW
+    PW->>WEB: open index.html?commandId=UUID
+    activate WEB
+    WEB->>HTTP2: GET /api/data?commandId=UUID
+    activate HTTP2
+    HTTP2->>SVC: findById(UUID)
+    SVC-->>HTTP2: Command
+    HTTP2->>WEB: JSON data
+    deactivate HTTP2
+    WEB->>WEB: render HTML
+    deactivate WEB
+    PW-->PW: render PDF From HTML
+    PW-->>PR: pdf byte array
+    deactivate PW
+    PR-->>SVC: pdf byte array
+    deactivate PR
+    SVC->>CR: remove(UUID)
+    activate CR
+    deactivate CR
+    SVC-->>HTTP1: pdf byte array
+    deactivate SVC
+    HTTP1-->>C: pdf file
+    deactivate HTTP1
+```
