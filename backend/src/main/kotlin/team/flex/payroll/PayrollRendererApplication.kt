@@ -5,6 +5,13 @@ import com.microsoft.playwright.BrowserType
 import com.microsoft.playwright.Page.PdfOptions
 import com.microsoft.playwright.Playwright
 import com.microsoft.playwright.options.LoadState
+import org.apache.commons.pool2.BasePooledObjectFactory
+import org.apache.commons.pool2.ObjectPool
+import org.apache.commons.pool2.PooledObject
+import org.apache.commons.pool2.PooledObjectFactory
+import org.apache.commons.pool2.impl.DefaultPooledObject
+import org.apache.commons.pool2.impl.GenericObjectPool
+import org.apache.commons.pool2.impl.GenericObjectPoolConfig
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.autoconfigure.web.ServerProperties
 import org.springframework.boot.runApplication
@@ -25,17 +32,13 @@ import java.util.concurrent.ConcurrentHashMap
 
 @SpringBootApplication
 class PayrollRendererApplication {
-    // Playwright Java API는 WebSocket 프로토콜로 headless Chromium과 통신한다
-    // -> Race Condition 유발 <- Browser 인스턴스 풀링등을 고려해봄직함
     @Bean(destroyMethod = "close")
     fun playwright(): Playwright =
         Playwright.create()
 
-    @Bean(destroyMethod = "close")
-    fun browser(playwright: Playwright): Browser =
-        playwright.chromium().launch(
-            BrowserType.LaunchOptions().setHeadless(true)
-        )
+    @Bean
+    fun browserPool(playwright: Playwright): BrowserPool =
+        BrowserPool(playwright)
 
     @Bean
     fun commandRegistry(): ConcurrentHashMap<UUID, HelloCommand> =
@@ -98,6 +101,28 @@ class PdfRenderingService(
 }
 
 @Component
+class PdfRenderer(
+    private val browserPool: BrowserPool,
+    private val serverProperties: ServerProperties,
+) {
+    fun renderHtmlToPdf(commandId: UUID): ByteArray? {
+        val browser = browserPool.borrowObject()
+
+        val pdfBytes = browser.newContext().use { context ->
+            context.newPage().use { page ->
+                page.navigate("http://localhost:${serverProperties.port}?commandId=${commandId}")
+                page.waitForLoadState(LoadState.NETWORKIDLE)
+                page.pdf(PdfOptions().setFormat("A4").setPrintBackground(true))
+            }
+        }
+
+        browserPool.returnObject(browser)
+
+        return pdfBytes
+    }
+}
+
+@Component
 class HelloCommandRepository(
     private val commandRegistry: ConcurrentHashMap<UUID, HelloCommand>,
 ) {
@@ -114,22 +139,67 @@ class HelloCommandRepository(
     }
 }
 
-@Component
-class PdfRenderer(
-    private val browser: Browser,
-    private val serverProperties: ServerProperties,
+class BrowserPool(
+    private val playwright: Playwright,
 ) {
-    fun renderHtmlToPdf(commandId: UUID): ByteArray? {
-        val context = browser.newContext()
+    private val noOfCpuCores = Runtime.getRuntime().availableProcessors()
+    private val pool: ObjectPool<Browser>
 
-        val page = context.newPage()
-        page.navigate("http://localhost:${serverProperties.port}?commandId=${commandId}")
-        page.waitForLoadState(LoadState.NETWORKIDLE)
-        val pdfBytes = page.pdf(PdfOptions().setFormat("A4").setPrintBackground(true))
+    init {
+        val factory: PooledObjectFactory<Browser> =
+            object : BasePooledObjectFactory<Browser>() {
+                override fun create(): Browser =
+                    playwright.chromium().launch(
+                        // see https://playwright.dev/java/docs/intro
+                        // see https://peter.sh/experiments/chromium-command-line-switches/
+                        BrowserType.LaunchOptions()
+                            .setChannel("chromium")
+                            .setHeadless(true)
+                            .setArgs(listOf("--disable-gpu"))
+                    )
 
-        page.close()
-        context.close()
+                override fun wrap(browser: Browser?): PooledObject<Browser> =
+                    DefaultPooledObject(browser)
 
-        return pdfBytes
+                override fun validateObject(p: PooledObject<Browser>): Boolean {
+                    val browser = p.`object`
+                    if (!browser.isConnected) {
+                        return false
+                    }
+
+                    return try {
+                        browser.newContext().use { context ->
+                            context.newPage().use { page ->
+                                page.evaluate("1+1") != null
+                            }
+                        }
+                    } catch (e: Exception) {
+                        false
+                    }
+                }
+            }
+
+        // TODO: 풀 크기, 최대 대기 시간 등 설정 외부화
+        // see org.apache.commons.pool2.impl.GenericObjectPoolConfig
+        val config: GenericObjectPoolConfig<Browser> =
+            GenericObjectPoolConfig<Browser>().apply {
+                minIdle = noOfCpuCores
+                maxIdle = minIdle
+                testOnCreate = true
+                testOnBorrow = true
+                testWhileIdle = true
+                testOnReturn = true
+            }
+
+        pool = GenericObjectPool(factory, config).apply {
+            addObjects(noOfCpuCores)
+        }
+    }
+
+    fun borrowObject(): Browser =
+        pool.borrowObject()
+
+    fun returnObject(browser: Browser) {
+        pool.returnObject(browser)
     }
 }

@@ -17,54 +17,59 @@ PAY-12961 pdf 렌더러 서버의 Kopring 포팅 가능성을 확인한다
 ### Run frontend locally
 
 ```shell
-./gradlew runFrontend
+$ ./gradlew runFrontend
 # localhost:3000
 ```
 
 ### Run backend & frontend locally
 
 ```shell
-./gradlew bootRun
+$ ./gradlew bootRun
 # localhost:8080
 ```
 
 test
 
 ```shell
-curl -H 'Content-type: application/json' -X POST http://localhost:8080/api/hello -d '{"name": "John"}' > ~/Desktop/hello.pdf
-open ~/Desktop/hello.pdf
+$ curl -H 'Content-type: application/json' -X POST http://localhost:8080/api/hello -d '{"name": "John"}' > ~/Desktop/hello.pdf
+$ open ~/Desktop/hello.pdf
 ```
 
 ### Build docker
 
 ```shell
-./gradlew jibDockerBuild
+$ ./gradlew jibDockerBuild
 
 $ docker image ls
 # REPOSITORY                TAG
 # flex-payroll-renderer     latest
 
-$ docker run -it --rm -p 8080:8080 flex-payroll-renderer:latest
-# 2025-07-25T05:54:55.132Z  INFO 1 --- [           main] t.f.p.PayrollRendererApplicationKt       : Started PayrollRendererApplicationKt in 2.927 seconds (process running for 3.798)
-
-$ docker run -it --rm -p 8080:8080 --memory-reservation=512m --memory=4g --cpus="4"  flex-payroll-renderer:latest
-# memory min 1g / max 4g, cpu 4 cores
-```
-
-### Performance test
-
-```shell
-$ brew install jmeter
-
-$ jmeter -n -t ./docs/hello-api-test.jmx -l ./build/hello-api-test-result.csv -e -o ./build/test-reports
-
-$ open ./build/test-reports/index.html
+$ docker run -it --rm -p 8080:8080 --memory-reservation=512m --memory=2g --cpus="4"  flex-payroll-renderer:latest
+# memory min 512m / max 2g, cpu 4 cores
 ```
 
 ### TODO
 
-- [x] Docker Image (JRE21 + PlayWright)
+- [x] Docker Image (JRE21 + PlayWright) -> see [Dockerfile](Dockerfile)
 - [x] 단위 시간당 처리량 측정
+
+![](docs/hello-api-test-summary.png)
+
+```shell
+# build docker image
+$ ./gradlew jibDockerBuild
+
+# run docker container
+$ docker run -it --rm -p 8080:8080 --memory-reservation=512m --memory=2g --cpus="4"  flex-payroll-renderer:latest
+
+# run jmeter
+$ brew install jmeter
+$ jmeter -n -t ./docs/hello-api-test.jmx -l ./build/hello-api-test-result.csv -e -o ./build/test-reports
+
+# check test results
+$ open ./build/test-reports/index.html
+```
+
 - [x] Spring <-> PlayWright+index.html 간 더 나은 데이터 교환 방식 연구
 
 ```mermaid
