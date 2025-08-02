@@ -72,7 +72,7 @@ $ docker run -it --rm -p 8080:8080 --memory-reservation=512m --memory=2g --cpus=
 
 - [x] Spring <-> PlayWright+index.html 간 더 나은 데이터 교환 방식 연구
 
-  1) index.html calls backend to fetch data
+  1) ~~index.html calls backend to fetch data~~ 폐기
   ```mermaid
   sequenceDiagram
       autonumber

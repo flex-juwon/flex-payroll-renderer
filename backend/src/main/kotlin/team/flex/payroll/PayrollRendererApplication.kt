@@ -30,6 +30,7 @@ import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RestController
 import java.io.ByteArrayInputStream
 import java.time.Duration
+import java.util.concurrent.locks.ReentrantLock
 
 @SpringBootApplication
 class PayrollRendererApplication {
@@ -74,16 +75,18 @@ class PdfRenderer(
     private val objectMapper: ObjectMapper,
 ) {
     private val logger: Logger = LoggerFactory.getLogger(javaClass)
+    private val mutex = ReentrantLock()
 
     fun renderHtmlToPdf(command: HelloCommand): ByteArray? {
         val maxAttempts = 3
-        val initialDelayMillis = 1000L
+        val initialDelayMillis = 100L
         val backoffMultiplier = 2
 
         var attempt = 0
         var delayMillis = initialDelayMillis
 
         while (true) {
+            mutex.lock()
             try {
                 return doRender(command)
             } catch (e: PlaywrightException) {
@@ -97,12 +100,15 @@ class PdfRenderer(
                 delayMillis *= backoffMultiplier
 
                 logger.warn("pdf 렌더링 작업을 ${delayMillis}ms 후에 재시도합니다: attempt=${attempt}/${maxAttempts}")
+            } finally {
+                mutex.unlock()
             }
         }
     }
 
     private fun doRender(command: HelloCommand): ByteArray? {
         val data = objectMapper.writeValueAsString(command)
+
         val browser = browserPool.borrowObject()
 
         val pdfBytes = browser.newContext().use { context ->
@@ -186,7 +192,7 @@ class BrowserPool(
                 testOnCreate = true
                 testOnBorrow = true
                 testWhileIdle = true
-                setMaxWait(Duration.ofMillis(3000L))
+                setMaxWait(Duration.ofMillis(100L))
             }
 
         pool = GenericObjectPool(factory, config).apply {
