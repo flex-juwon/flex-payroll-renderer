@@ -32,6 +32,19 @@ import java.io.ByteArrayInputStream
 import java.time.Duration
 import java.util.concurrent.locks.ReentrantLock
 
+object PayrollRendererConfig {
+    private const val BROWSER_POOL_MIN_SIZE = 2
+    private const val BROWSER_POOL_MAX_SIZE = 8
+    const val BROWSER_WAIT_TIMEOUT_MILLIS = 5000L
+    val BROWSER_POOL_SIZE = Runtime.getRuntime().availableProcessors()
+        .coerceAtMost(BROWSER_POOL_MIN_SIZE)
+        .coerceAtLeast(BROWSER_POOL_MAX_SIZE)
+
+    const val RETRY_INITIAL_DELAY_MILLIS = 1000L
+    const val RETRY_MAX_ATTEMPTS = 3
+    const val RETRY_BACKOFF_MULTIPLIER = 2
+}
+
 @SpringBootApplication
 class PayrollRendererApplication {
     @Bean(destroyMethod = "close")
@@ -75,12 +88,16 @@ class PdfRenderer(
     private val objectMapper: ObjectMapper,
 ) {
     private val logger: Logger = LoggerFactory.getLogger(javaClass)
+
+    // TODO: BrowserPool을 병렬로 사용한다
+    // 현재 구현은 안정성을 위해 pdf 렌더링 구간을 하나의 mutex에서 실행하도록 하고 있다.
+    // 즉, BrowserPool은 항상 active=1, idle=7 상태로 7개의 특정 시점에 7개의 브라우저는 휴면 상태이다
     private val mutex = ReentrantLock()
 
     fun renderHtmlToPdf(command: HelloCommand): ByteArray? {
-        val maxAttempts = 3
-        val initialDelayMillis = 100L
-        val backoffMultiplier = 2
+        val maxAttempts = PayrollRendererConfig.RETRY_MAX_ATTEMPTS
+        val initialDelayMillis = PayrollRendererConfig.RETRY_INITIAL_DELAY_MILLIS
+        val backoffMultiplier = PayrollRendererConfig.RETRY_BACKOFF_MULTIPLIER
 
         var attempt = 0
         var delayMillis = initialDelayMillis
@@ -99,14 +116,16 @@ class PdfRenderer(
                 Thread.sleep(delayMillis)
                 delayMillis *= backoffMultiplier
 
-                logger.warn("pdf 렌더링 작업을 ${delayMillis}ms 후에 재시도합니다: attempt=${attempt}/${maxAttempts}")
+                logger.warn("pdf 렌더링 작업을 {}ms 후에 재시도합니다: attempt={}/{}", delayMillis, attempt, maxAttempts)
             } finally {
                 mutex.unlock()
             }
         }
     }
 
-    private fun doRender(command: HelloCommand): ByteArray? {
+    private fun doRender(
+        command: HelloCommand,
+    ): ByteArray? {
         val data = objectMapper.writeValueAsString(command)
 
         val browser = browserPool.borrowObject()
@@ -137,7 +156,7 @@ class BrowserPool(
 ) {
     private val logger: Logger = LoggerFactory.getLogger(javaClass)
 
-    private val poolSize = Runtime.getRuntime().availableProcessors().coerceAtMost(8).coerceAtLeast(2)
+    private val poolSize = PayrollRendererConfig.BROWSER_POOL_SIZE
     private val pool: ObjectPool<Browser>
 
     init {
@@ -164,20 +183,12 @@ class BrowserPool(
                     DefaultPooledObject(browser)
 
                 override fun validateObject(pooledObject: PooledObject<Browser>): Boolean {
-                    val browser = pooledObject.`object`
-                    if (!browser.isConnected) {
-                        logger.warn("브라우저 인스턴스와 연결이 끊어졌습니다: browserId={}", browser.hashCode())
-                        return false
-                    }
+                    val page = pooledObject.`object`.newPage()
 
                     return try {
-                        browser.newContext().use { context ->
-                            context.newPage().use { page ->
-                                page.evaluate("1+1") != null
-                            }
-                        }
+                        page.close()
+                        true
                     } catch (e: Exception) {
-                        logger.warn("브라우저 인스턴스가 비정상 상태입니다: errorMessage={}", e.message)
                         false
                     }
                 }
@@ -192,33 +203,63 @@ class BrowserPool(
                 testOnCreate = true
                 testOnBorrow = true
                 testWhileIdle = true
-                setMaxWait(Duration.ofMillis(100L))
+                testOnReturn = true
+                setMaxWait(Duration.ofMillis(PayrollRendererConfig.BROWSER_WAIT_TIMEOUT_MILLIS))
             }
 
         pool = GenericObjectPool(factory, config).apply {
             addObjects(poolSize)
         }
 
-        logger.info("브라우저 풀이 준비됐습니다: numIdle={}, numActive={}", pool.numIdle, pool.numActive)
+        logger.info(
+            "브라우저 풀이 준비됐습니다: idle={}, active={}, waiting={}",
+            pool.numIdle, pool.numActive, pool.numWaiters
+        )
     }
 
     fun borrowObject(): Browser {
         val browser = pool.borrowObject()
 
-        logger.info(
-            "브라우저 인스턴스를 구했습니다: browserId={}, numIdle={}, numActive={}",
-            browser.hashCode(), pool.numIdle, pool.numActive
-        )
+        return when (pool) {
+            is GenericObjectPool -> {
+                logger.info(
+                    "브라우저 인스턴스를 구했습니다: browserId={}, idle={}, active={}, waiting={}",
+                    browser.hashCode(), pool.numIdle, pool.numActive, pool.numWaiters
+                )
+                browser
+            }
 
-        return browser
+            else -> browser
+        }
     }
 
     fun returnObject(browser: Browser) {
         pool.returnObject(browser)
 
-        logger.info(
-            "브라우저 인스턴스를 반납했습니다: browserId={}, numIdle={}, numActive={}",
-            browser.hashCode(), pool.numIdle, pool.numActive
-        )
+        when (pool) {
+            is GenericObjectPool -> {
+                logger.info(
+                    "브라우저 인스턴스를 반납했습니다: browserId={}, idle={}, active={}, waiting={}",
+                    browser.hashCode(), pool.numIdle, pool.numActive, pool.numWaiters,
+                )
+            }
+
+            else -> {}
+        }
+    }
+
+    fun invalidateObject(browser: Browser) {
+        pool.invalidateObject(browser)
+
+        when (pool) {
+            is GenericObjectPool -> {
+                logger.info(
+                    "브라우저 인스턴스를 제거합니다: browserId={}, idle={}, active={}, waiting={}",
+                    browser.hashCode(), pool.numIdle, pool.numActive, pool.numWaiters,
+                )
+            }
+
+            else -> {}
+        }
     }
 }
