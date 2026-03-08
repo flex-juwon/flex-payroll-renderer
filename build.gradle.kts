@@ -30,6 +30,12 @@ val buildFrontend = tasks.register<com.github.gradle.node.npm.task.NpmTask>("bui
     dependsOn(tasks.npmInstall)
     workingDir.set(file(frontendDir))
     args.set(listOf("run", "build"))
+    // Node.js 17+ uses OpenSSL 3 which breaks react-scripts 5; legacy provider restores compatibility.
+    // CI=false prevents react-scripts from treating lint warnings as errors in CI environments.
+    environment.set(mapOf(
+        "NODE_OPTIONS" to "--openssl-legacy-provider",
+        "CI" to "false"
+    ))
 }
 
 val copyFrontend = tasks.register("copyFrontend") {
