@@ -1,0 +1,123 @@
+name: JMeter Performance Baseline
+
+on:
+  workflow_dispatch:
+
+jobs:
+  jmeter-baseline:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Build Docker image with Jib
+        run: ./gradlew jibDockerBuild
+
+      - name: Start application in Docker
+        run: |
+          docker run -d --name payroll-renderer \
+            -p 8080:8080 \
+            --memory-reservation=512m \
+            --memory=2g \
+            --cpus="2" \
+            flex-payroll-renderer:latest
+
+      - name: Wait for application to be ready (/actuator/health)
+        run: |
+          echo "Waiting for application to start (max 5 minutes)..."
+          for i in $(seq 1 60); do
+            STATUS=$(curl -sf http://localhost:8080/actuator/health 2>/dev/null \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null \
+              || echo "")
+            if [ "$STATUS" = "UP" ]; then
+              echo "Application is ready!"
+              exit 0
+            fi
+            echo "Attempt $i/60: status='$STATUS', waiting 5s..."
+            sleep 5
+          done
+          echo "Application failed to start within 5 minutes"
+          docker logs payroll-renderer
+          exit 1
+
+      - name: Install JMeter 5.6.3
+        run: |
+          JMETER_VERSION=5.6.3
+          wget -q "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz"
+          tar -xzf "apache-jmeter-${JMETER_VERSION}.tgz"
+          echo "$(pwd)/apache-jmeter-${JMETER_VERSION}/bin" >> $GITHUB_PATH
+
+      - name: Run JMeter test (5 threads, 60s)
+        run: |
+          mkdir -p build/jmeter-results build/test-reports
+          jmeter -n \
+            -t ./docs/hello-api-test.jmx \
+            -l ./build/jmeter-results/hello-api-test-result.csv \
+            -e -o ./build/test-reports
+
+      - name: Print test summary
+        if: always()
+        run: |
+          CSV=./build/jmeter-results/hello-api-test-result.csv
+          if [ -f "$CSV" ]; then
+            TOTAL=$(tail -n +2 "$CSV" | wc -l)
+            SUCCESS=$(tail -n +2 "$CSV" | awk -F',' '{if ($8=="true") count++} END {print count+0}')
+            FAIL=$((TOTAL - SUCCESS))
+            AVG_ELAPSED=$(tail -n +2 "$CSV" | awk -F',' '{sum+=$2; count++} END {printf "%.0f", sum/count}')
+            echo "## JMeter Baseline Test Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Total Requests | $TOTAL |" >> $GITHUB_STEP_SUMMARY
+            echo "| Successful | $SUCCESS |" >> $GITHUB_STEP_SUMMARY
+            echo "| Failed | $FAIL |" >> $GITHUB_STEP_SUMMARY
+            echo "| Avg Response Time (ms) | $AVG_ELAPSED |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Copy results to docs/baseline/
+        run: |
+          TIMESTAMP=$(date -u '+%Y%m%d-%H%M%S')
+          mkdir -p docs/baseline
+          cp ./build/jmeter-results/hello-api-test-result.csv \
+            "docs/baseline/hello-api-test-result-${TIMESTAMP}.csv"
+
+      - name: Commit baseline results to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/baseline/
+          if git diff --cached --quiet; then
+            echo "No new results to commit"
+          else
+            git commit -m "perf: add JMeter baseline test results [skip ci]"
+            git push
+          fi
+
+      - name: Upload JMeter HTML report as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jmeter-html-report-${{ github.run_number }}
+          path: build/test-reports/
+          retention-days: 90
+
+      - name: Upload JMeter CSV results as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jmeter-csv-results-${{ github.run_number }}
+          path: build/jmeter-results/
+          retention-days: 90
+
+      - name: Stop Docker container
+        if: always()
+        run: docker stop payroll-renderer || true
