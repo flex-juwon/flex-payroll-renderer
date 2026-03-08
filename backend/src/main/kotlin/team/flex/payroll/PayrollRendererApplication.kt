@@ -29,16 +29,18 @@ import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RestController
 import java.io.ByteArrayInputStream
+import java.io.Closeable
 import java.time.Duration
-import java.util.concurrent.locks.ReentrantLock
 
 object PayrollRendererConfig {
     private const val BROWSER_POOL_MIN_SIZE = 2
     private const val BROWSER_POOL_MAX_SIZE = 8
     const val BROWSER_WAIT_TIMEOUT_MILLIS = 5000L
+
+    // Fix Issue 1: coerceAtMost/coerceAtLeast 순서가 반전되어 있었음 → 항상 MAX=8을 반환하는 버그 수정
     val BROWSER_POOL_SIZE = Runtime.getRuntime().availableProcessors()
-        .coerceAtMost(BROWSER_POOL_MIN_SIZE)
-        .coerceAtLeast(BROWSER_POOL_MAX_SIZE)
+        .coerceAtLeast(BROWSER_POOL_MIN_SIZE)  // 최소 2
+        .coerceAtMost(BROWSER_POOL_MAX_SIZE)   // 최대 8
 
     const val RETRY_INITIAL_DELAY_MILLIS = 1000L
     const val RETRY_MAX_ATTEMPTS = 3
@@ -47,13 +49,9 @@ object PayrollRendererConfig {
 
 @SpringBootApplication
 class PayrollRendererApplication {
+    // Fix Issue 4: 공유 Playwright 싱글톤 제거 — 각 풀 슬롯이 독립적인 Playwright 인스턴스를 소유
     @Bean(destroyMethod = "close")
-    fun playwright(): Playwright =
-        Playwright.create()
-
-    @Bean
-    fun browserPool(playwright: Playwright): BrowserPool =
-        BrowserPool(playwright)
+    fun browserPool(): BrowserPool = BrowserPool()
 }
 
 fun main(args: Array<String>) {
@@ -89,83 +87,80 @@ class PdfRenderer(
 ) {
     private val logger: Logger = LoggerFactory.getLogger(javaClass)
 
-    // TODO: BrowserPool을 병렬로 사용한다
-    // 현재 구현은 안정성을 위해 pdf 렌더링 구간을 하나의 mutex에서 실행하도록 하고 있다.
-    // 즉, BrowserPool은 항상 active=1, idle=7 상태로 7개의 특정 시점에 7개의 브라우저는 휴면 상태이다
-    private val mutex = ReentrantLock()
-
-    fun renderHtmlToPdf(command: HelloCommand): ByteArray? {
+    // Fix Issue 2: 전역 Mutex 제거 — BrowserPool이 동시성을 제어하므로 별도의 락 불필요
+    // BrowserPool의 maxTotal이 최대 동시 렌더링 수를 결정하며, 풀 소진 시 maxWait 후 타임아웃
+    fun renderHtmlToPdf(command: HelloCommand): ByteArray {
         val maxAttempts = PayrollRendererConfig.RETRY_MAX_ATTEMPTS
-        val initialDelayMillis = PayrollRendererConfig.RETRY_INITIAL_DELAY_MILLIS
-        val backoffMultiplier = PayrollRendererConfig.RETRY_BACKOFF_MULTIPLIER
-
         var attempt = 0
-        var delayMillis = initialDelayMillis
+        var delayMillis = PayrollRendererConfig.RETRY_INITIAL_DELAY_MILLIS
 
         while (true) {
-            mutex.lock()
             try {
                 return doRender(command)
             } catch (e: PlaywrightException) {
-                attempt++
-
-                if (attempt >= maxAttempts) {
-                    throw e
-                }
-
-                Thread.sleep(delayMillis)
-                delayMillis *= backoffMultiplier
-
+                if (++attempt >= maxAttempts) throw e
                 logger.warn("pdf 렌더링 작업을 {}ms 후에 재시도합니다: attempt={}/{}", delayMillis, attempt, maxAttempts)
-            } finally {
-                mutex.unlock()
+                Thread.sleep(delayMillis)
+                delayMillis *= PayrollRendererConfig.RETRY_BACKOFF_MULTIPLIER
             }
         }
     }
 
-    private fun doRender(
-        command: HelloCommand,
-    ): ByteArray? {
+    private fun doRender(command: HelloCommand): ByteArray {
         val data = objectMapper.writeValueAsString(command)
+        val entry = browserPool.borrowObject()
 
-        val browser = browserPool.borrowObject()
+        // Fix Issue 3: 예외 발생 시 브라우저 누수 방지
+        // - 정상 종료: returnObject로 풀에 반납 (also 블록)
+        // - 예외 발생: invalidateObject로 비정상 브라우저 폐기 후 재생성 (catch 블록)
+        return try {
+            entry.browser.newContext().use { context ->
+                context.newPage().use { page ->
+                    page.addInitScript("window.initialData = $data")
+                    page.navigate("http://localhost:${serverProperties.port}")
+                    page.waitForLoadState(LoadState.NETWORKIDLE)
 
-        val pdfBytes = browser.newContext().use { context ->
-            context.newPage().use { page ->
-                page.addInitScript("window.initialData = $data")
-                page.navigate("http://localhost:${serverProperties.port}")
-                page.waitForLoadState(LoadState.NETWORKIDLE)
+                    logger.info(
+                        "html 페이지를 렌더링했습니다. pdf 렌더링을 시작합니다: browserId={}, contextId={}, pageId={}, data={}",
+                        entry.browser.hashCode(), context.hashCode(), page.hashCode(), data
+                    )
 
-                logger.info(
-                    "html 페이지를 렌더링했습니다. pdf 렌더링을 시작합니다: browserId={}, contextId={}, pageId={}, data={}",
-                    browser.hashCode(), context.hashCode(), page.hashCode(), data
-                )
-
-                page.pdf(PdfOptions().setFormat("A4").setPrintBackground(true))
+                    page.pdf(PdfOptions().setFormat("A4").setPrintBackground(true))
+                }
             }
+        } catch (e: Exception) {
+            browserPool.invalidateObject(entry)
+            throw e
+        }.also {
+            browserPool.returnObject(entry)
         }
-
-        browserPool.returnObject(browser)
-
-        return pdfBytes
     }
 }
 
-class BrowserPool(
-    playwright: Playwright,
-) {
+// Fix Issue 4: Playwright 멀티스레드 안전성 — 풀 슬롯별로 독립적인 Playwright 인스턴스 보유
+// Playwright 인스턴스는 스레드에 귀속되어야 하므로 단일 인스턴스를 여러 스레드에서 공유하면 안 됨
+data class BrowserWithPlaywright(val playwright: Playwright, val browser: Browser) : Closeable {
+    override fun close() {
+        browser.close()
+        playwright.close()
+    }
+}
+
+class BrowserPool : Closeable {
     private val logger: Logger = LoggerFactory.getLogger(javaClass)
 
     private val poolSize = PayrollRendererConfig.BROWSER_POOL_SIZE
-    private val pool: ObjectPool<Browser>
+    private val pool: ObjectPool<BrowserWithPlaywright>
 
     init {
-        val factory: PooledObjectFactory<Browser> =
-            object : BasePooledObjectFactory<Browser>() {
+        val factory: PooledObjectFactory<BrowserWithPlaywright> =
+            object : BasePooledObjectFactory<BrowserWithPlaywright>() {
                 private val logger: Logger = LoggerFactory.getLogger(javaClass)
 
-                override fun create(): Browser {
-                    val browser = playwright.chromium().launch(
+                override fun create(): BrowserWithPlaywright {
+                    // 각 풀 슬롯마다 독립적인 Playwright + Browser 인스턴스 생성
+                    val pw = Playwright.create()
+                    val browser = pw.chromium().launch(
                         // see https://playwright.dev/java/docs/intro
                         // see https://peter.sh/experiments/chromium-command-line-switches/
                         BrowserType.LaunchOptions()
@@ -176,34 +171,31 @@ class BrowserPool(
 
                     logger.info("새 브라우저 인스턴스를 생성했습니다: browserId={}", browser.hashCode())
 
-                    return browser
+                    return BrowserWithPlaywright(pw, browser)
                 }
 
-                override fun wrap(browser: Browser?): PooledObject<Browser> =
-                    DefaultPooledObject(browser)
+                override fun wrap(entry: BrowserWithPlaywright?): PooledObject<BrowserWithPlaywright> =
+                    DefaultPooledObject(entry)
 
-                override fun validateObject(pooledObject: PooledObject<Browser>): Boolean {
-                    val page = pooledObject.`object`.newPage()
+                // Fix Issue 5: validateObject 경량화 — 새 페이지 생성 대신 isConnected() 사용
+                override fun validateObject(pooledObject: PooledObject<BrowserWithPlaywright>): Boolean =
+                    pooledObject.`object`.browser.isConnected
 
-                    return try {
-                        page.close()
-                        true
-                    } catch (e: Exception) {
-                        false
-                    }
+                override fun destroyObject(p: PooledObject<BrowserWithPlaywright>) {
+                    p.`object`.close()
                 }
             }
 
         // see org.apache.commons.pool2.impl.GenericObjectPoolConfig
-        val config: GenericObjectPoolConfig<Browser> =
-            GenericObjectPoolConfig<Browser>().apply {
+        val config: GenericObjectPoolConfig<BrowserWithPlaywright> =
+            GenericObjectPoolConfig<BrowserWithPlaywright>().apply {
                 minIdle = poolSize
                 maxIdle = poolSize
                 maxTotal = poolSize
                 testOnCreate = true
                 testOnBorrow = true
                 testWhileIdle = true
-                testOnReturn = true
+                testOnReturn = false  // 반납 시 검증 생략으로 오버헤드 완화
                 setMaxWait(Duration.ofMillis(PayrollRendererConfig.BROWSER_WAIT_TIMEOUT_MILLIS))
             }
 
@@ -217,30 +209,30 @@ class BrowserPool(
         )
     }
 
-    fun borrowObject(): Browser {
-        val browser = pool.borrowObject()
+    fun borrowObject(): BrowserWithPlaywright {
+        val entry = pool.borrowObject()
 
         return when (pool) {
             is GenericObjectPool -> {
                 logger.info(
                     "브라우저 인스턴스를 구했습니다: browserId={}, idle={}, active={}, waiting={}",
-                    browser.hashCode(), pool.numIdle, pool.numActive, pool.numWaiters
+                    entry.browser.hashCode(), pool.numIdle, pool.numActive, pool.numWaiters
                 )
-                browser
+                entry
             }
 
-            else -> browser
+            else -> entry
         }
     }
 
-    fun returnObject(browser: Browser) {
-        pool.returnObject(browser)
+    fun returnObject(entry: BrowserWithPlaywright) {
+        pool.returnObject(entry)
 
         when (pool) {
             is GenericObjectPool -> {
                 logger.info(
                     "브라우저 인스턴스를 반납했습니다: browserId={}, idle={}, active={}, waiting={}",
-                    browser.hashCode(), pool.numIdle, pool.numActive, pool.numWaiters,
+                    entry.browser.hashCode(), pool.numIdle, pool.numActive, pool.numWaiters,
                 )
             }
 
@@ -248,18 +240,22 @@ class BrowserPool(
         }
     }
 
-    fun invalidateObject(browser: Browser) {
-        pool.invalidateObject(browser)
+    fun invalidateObject(entry: BrowserWithPlaywright) {
+        pool.invalidateObject(entry)
 
         when (pool) {
             is GenericObjectPool -> {
                 logger.info(
                     "브라우저 인스턴스를 제거합니다: browserId={}, idle={}, active={}, waiting={}",
-                    browser.hashCode(), pool.numIdle, pool.numActive, pool.numWaiters,
+                    entry.browser.hashCode(), pool.numIdle, pool.numActive, pool.numWaiters,
                 )
             }
 
             else -> {}
         }
+    }
+
+    override fun close() {
+        pool.close()
     }
 }

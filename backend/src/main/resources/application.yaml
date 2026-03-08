@@ -5,6 +5,9 @@ server:
       min-spare: 20
 
 spring:
+  threads:
+    virtual:
+      enabled: true  # Java 21 Virtual Thread 활성화 — 블로킹 렌더링 작업에서 OS 스레드 낭비 방지
   web:
     resources:
       static-locations: classpath:/public/
